@@ -1,0 +1,116 @@
+import cv2
+import numpy as np
+import mediapipe as mp
+
+mp_hands = mp.solutions.hands
+mp_draw = mp.solutions.drawing_utils
+
+cap = cv2.VideoCapture(0)
+
+# Verificar se a webcam está funcionando
+ret, frame = cap.read()
+if not ret:
+    print("Erro ao acessar a webcam.")
+    cap.release()
+    exit()
+
+altura, largura, _ = frame.shape
+canvas = np.ones((altura, largura, 3), dtype=np.uint8) * 255
+
+# Cores padrão
+colors = [(0, 0, 0), (255, 0, 0), (0, 255, 0), (0, 0, 255),
+          (255, 255, 0), (255, 165, 0), (0, 255, 255), (0, 165, 255)]
+brush_color_index = 0
+drawing_enabled = True
+brush_thickness = 3
+
+# Parâmetros do slider
+slider_y1 = altura - 60
+slider_y2 = altura - 30
+slider_margin = 60
+slider_x1 = slider_margin
+slider_x2 = largura - slider_margin
+min_thickness = 1
+max_thickness = 50
+
+with mp_hands.Hands(max_num_hands=1, min_detection_confidence=0.7) as hands:
+    prev_point = None
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        frame = cv2.flip(frame, 1)
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+        results = hands.process(rgb)
+        x8, y8, x4, y4 = None, None, None, None
+
+        if results.multi_hand_landmarks:
+            for hand_landmarks in results.multi_hand_landmarks:
+                mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+
+                h, w, _ = frame.shape
+                x8 = int(hand_landmarks.landmark[8].x * w)
+                y8 = int(hand_landmarks.landmark[8].y * h)
+                x4 = int(hand_landmarks.landmark[4].x * w)
+                y4 = int(hand_landmarks.landmark[4].y * h)
+
+                # Mostrar posição dos dedos
+                cv2.circle(frame, (x8, y8), 10, colors[brush_color_index], cv2.FILLED)
+                cv2.circle(frame, (x4, y4), 10, (200, 200, 200), cv2.FILLED)
+                cv2.line(frame, (x4, y4), (x8, y8), (150, 150, 150), 1)
+
+                # Atualiza a espessura se dedo está no slider
+                if slider_y1 <= y8 <= slider_y2:
+                    brush_thickness = int(np.interp(x8, [slider_x1, slider_x2], [min_thickness, max_thickness]))
+
+                # Verifica se indicador e polegar estão juntos
+                distance = np.hypot(x8 - x4, y8 - y4)
+                touching = distance < 40  # Limiar ajustável
+
+                # Só desenha se estiver tocando e fora do slider
+                if drawing_enabled and touching and y8 < slider_y1:
+                    if prev_point is not None:
+                        cv2.line(canvas, prev_point, (x8, y8), colors[brush_color_index], brush_thickness)
+                    prev_point = (x8, y8)
+                else:
+                    prev_point = None
+        else:
+            prev_point = None
+
+        # Desenhar slider no canvas
+        canvas_slider = canvas.copy()
+
+        # Linha do slider
+        cv2.rectangle(canvas_slider, (slider_x1, slider_y1), (slider_x2, slider_y2), (180, 180, 180), -1)
+
+        # Triângulo indicador
+        triangle_x = int(np.interp(brush_thickness, [min_thickness, max_thickness], [slider_x1, slider_x2]))
+        triangle_pts = np.array([
+            [triangle_x, slider_y1 - 10],
+            [triangle_x - 10, slider_y1 - 30],
+            [triangle_x + 10, slider_y1 - 30]
+        ])
+        cv2.drawContours(canvas_slider, [triangle_pts], 0, (0, 0, 0), -1)
+
+        # Texto da espessura atual
+        cv2.putText(canvas_slider, f'Thickness: {brush_thickness}', (slider_x1, slider_y1 - 40),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (50, 50, 50), 2)
+
+        # Mostrar janelas
+        cv2.imshow("Landmarks", frame)
+        cv2.imshow("Desenho", canvas_slider)
+
+        key = cv2.waitKey(1) & 0xFF
+        if key == 27:  # ESC
+            break
+        elif key == ord('c'):
+            canvas = np.ones((altura, largura, 3), dtype=np.uint8) * 255
+        elif key == ord('b'):
+            drawing_enabled = not drawing_enabled
+        elif key == ord('r'):
+            brush_color_index = (brush_color_index + 1) % len(colors)
+
+cap.release()
+cv2.destroyAllWindows()
