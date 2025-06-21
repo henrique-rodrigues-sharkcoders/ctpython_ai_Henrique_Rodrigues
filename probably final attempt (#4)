@@ -1,6 +1,21 @@
 import cv2
 import numpy as np
 import mediapipe as mp
+import random
+import time
+
+# Variáveis globais para o jogo da cobra
+snake = []
+food = None
+snake_direction = (0, 0) # (dx, dy)
+game_over = False
+score = 0
+
+# Configurações do jogo
+CELL_SIZE = 20
+GAME_WIDTH = 600
+GAME_HEIGHT = 400
+GAME_SPEED = 0.05 # Diminuir a velocidade (maior valor = mais lento)
 
 def inicializar_camera():
     cap = cv2.VideoCapture(0)
@@ -62,6 +77,8 @@ def processar_mao(frame, hands, brush_color_index, brush_thickness,
     results = hands.process(rgb)
 
     x8, y8, x4, y4 = None, None, None, None
+    fingers_up = 0
+    thumb_up_fist_detected = False
 
     if results.multi_hand_landmarks:
         for hand_landmarks in results.multi_hand_landmarks:
@@ -73,6 +90,34 @@ def processar_mao(frame, hands, brush_color_index, brush_thickness,
             x4 = int(hand_landmarks.landmark[4].x * w)
             y4 = int(hand_landmarks.landmark[4].y * h)
 
+            # Check if thumb is up
+            thumb_is_up = hand_landmarks.landmark[4].y < hand_landmarks.landmark[3].y and \
+                          hand_landmarks.landmark[4].y < hand_landmarks.landmark[2].y
+
+            # Check if other fingers are curled (tips below middle joints)
+            index_finger_curled = hand_landmarks.landmark[8].y > hand_landmarks.landmark[6].y
+            middle_finger_curled = hand_landmarks.landmark[12].y > hand_landmarks.landmark[10].y
+            ring_finger_curled = hand_landmarks.landmark[16].y > hand_landmarks.landmark[14].y
+            pinky_finger_curled = hand_landmarks.landmark[20].y > hand_landmarks.landmark[18].y
+
+            all_fingers_curled = index_finger_curled and middle_finger_curled and \
+                                 ring_finger_curled and pinky_finger_curled
+
+            if thumb_is_up and all_fingers_curled:
+                thumb_up_fist_detected = True
+
+            # Original finger up detection (for drawing and slider, not for game start)
+            if hand_landmarks.landmark[4].x < hand_landmarks.landmark[3].x: # For right hand, thumb tip is left of base
+                fingers_up += 1
+            if hand_landmarks.landmark[8].y < hand_landmarks.landmark[6].y:
+                fingers_up += 1
+            if hand_landmarks.landmark[12].y < hand_landmarks.landmark[10].y:
+                fingers_up += 1
+            if hand_landmarks.landmark[16].y < hand_landmarks.landmark[14].y:
+                fingers_up += 1
+            if hand_landmarks.landmark[20].y < hand_landmarks.landmark[18].y:
+                fingers_up += 1
+
             cv2.circle(frame, (x8, y8), 10, colors[brush_color_index], cv2.FILLED)
             cv2.circle(frame, (x4, y4), 10, (200, 200, 200), cv2.FILLED)
             cv2.line(frame, (x4, y4), (x8, y8), (150, 150, 150), 1)
@@ -83,17 +128,102 @@ def processar_mao(frame, hands, brush_color_index, brush_thickness,
             distance = np.hypot(x8 - x4, y8 - y4)
             touching = distance < 40
 
-            # Return x8, y8, touching, prev_point for drawing logic in main
-            return frame, brush_thickness, prev_point, x8, y8, touching
+            return frame, brush_thickness, prev_point, x8, y8, touching, fingers_up, thumb_up_fist_detected
     else:
         prev_point = None
 
-    return frame, brush_thickness, prev_point, x8, y8, False
+    return frame, brush_thickness, prev_point, x8, y8, False, 0, False
+
+def blur_face(frame, face_detection):
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    results = face_detection.process(rgb)
+
+    if results.detections:
+        for detection in results.detections:
+            bboxC = detection.location_data.relative_bounding_box
+            ih, iw, _ = frame.shape
+            x, y, w, h = int(bboxC.xmin * iw), int(bboxC.ymin * ih), \
+                         int(bboxC.width * iw), int(bboxC.height * ih)
+
+            # Ensure bounding box is within frame boundaries
+            x = max(0, x)
+            y = max(0, y)
+            w = min(iw - x, w)
+            h = min(ih - y, h)
+
+            if w > 0 and h > 0:
+                face_roi = frame[y:y+h, x:x+w]
+                face_roi = cv2.GaussianBlur(face_roi, (99, 99), 30)
+                frame[y:y+h, x:x+w] = face_roi
+    return frame
+
+def init_snake_game():
+    global snake, food, snake_direction, game_over, score
+    snake = [(GAME_WIDTH // 2, GAME_HEIGHT // 2)]
+    snake_direction = (CELL_SIZE, 0) # Start moving right
+    game_over = False
+    score = 0
+    place_food()
+
+def place_food():
+    global food
+    while True:
+        fx = random.randrange(0, GAME_WIDTH, CELL_SIZE)
+        fy = random.randrange(0, GAME_HEIGHT, CELL_SIZE)
+        food = (fx, fy)
+        if food not in snake:
+            break
+
+def update_snake_game():
+    global snake, food, snake_direction, game_over, score
+
+    if game_over:
+        return
+
+    head_x, head_y = snake[0]
+    new_head = (head_x + snake_direction[0], head_y + snake_direction[1])
+
+    # Wrap around walls instead of dying
+    new_head_x = new_head[0] % GAME_WIDTH
+    new_head_y = new_head[1] % GAME_HEIGHT
+    new_head = (new_head_x, new_head_y)
+
+    # Collision with self
+    if new_head in snake:
+        game_over = True
+        return
+
+    snake.insert(0, new_head)
+
+    # Eat food
+    if new_head == food:
+        score += 1
+        place_food()
+    else:
+        snake.pop()
+
+def draw_snake_game(canvas):
+    canvas[:] = (255, 255, 255) # Clear canvas
+
+    # Draw food
+    if food:
+        cv2.rectangle(canvas, (food[0], food[1]), (food[0] + CELL_SIZE, food[1] + CELL_SIZE), (0, 0, 255), -1)
+
+    # Draw snake
+    for segment in snake:
+        cv2.rectangle(canvas, (segment[0], segment[1]), (segment[0] + CELL_SIZE, segment[1] + CELL_SIZE), (0, 255, 0), -1)
+
+    # Display score
+    cv2.putText(canvas, f'Score: {score}', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
+
+    if game_over:
+        cv2.putText(canvas, 'GAME OVER!', (GAME_WIDTH // 2 - 100, GAME_HEIGHT // 2), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
 
 def main():
-    global mp_draw, mp_hands
+    global mp_draw, mp_hands, snake_direction, game_active, game_over
     mp_hands = mp.solutions.hands
     mp_draw = mp.solutions.drawing_utils
+    mp_face_detection = mp.solutions.face_detection
 
     colors = [
         (0, 0, 0), (255, 0, 0), (0, 255, 0), (0, 0, 255),
@@ -108,8 +238,8 @@ def main():
     cap, frame = inicializar_camera()
     altura, largura, _ = frame.shape
 
-    canvas_largura = largura
-    canvas_altura = altura
+    canvas_largura = GAME_WIDTH
+    canvas_altura = GAME_HEIGHT
     canvas = criar_canvas(canvas_altura, canvas_largura)
 
     slider_y1, slider_y2, slider_x1, slider_x2 = configurar_slider(altura, largura)
@@ -121,7 +251,11 @@ def main():
         "clean": {"pos": (330, 10), "text": "Clean"},
     }
 
-    with mp_hands.Hands(max_num_hands=1, min_detection_confidence=0.7) as hands:
+    game_active = False
+    init_snake_game()
+
+    with mp_hands.Hands(max_num_hands=1, min_detection_confidence=0.7) as hands, \
+         mp_face_detection.FaceDetection(min_detection_confidence=0.7) as face_detection:
 
         prev_point = None
         while True:
@@ -129,11 +263,13 @@ def main():
             if not ret:
                 break
 
-            frame_webcam, brush_thickness, prev_point_webcam, x8, y8, touching = processar_mao(
+            frame_webcam, brush_thickness, prev_point_webcam, x8, y8, touching, fingers_up, thumb_up_fist_detected = processar_mao(
                 frame.copy(), hands, brush_color_index, brush_thickness,
                 drawing_enabled, prev_point, slider_y1, slider_y2, slider_x1, slider_x2,
                 min_thickness, max_thickness, colors
             )
+
+            frame_webcam = blur_face(frame_webcam, face_detection)
 
             draw_rounded_button(frame_webcam, *buttons["color"]["pos"], btn_w, btn_h, buttons["color"]["text"], active=True)
             draw_rounded_button(frame_webcam, *buttons["draw"]["pos"], btn_w, btn_h, buttons["draw"]["text"], active=drawing_enabled)
@@ -158,8 +294,34 @@ def main():
             else:
                 prev_point = None
 
-            cv2.imshow('Webcam with Controls', frame_webcam)
-            cv2.imshow('Whiteboard', canvas)
+            # Snake game logic
+            if thumb_up_fist_detected and not game_active:
+                game_active = True
+                init_snake_game()
+
+            if game_active:
+                update_snake_game()
+                draw_snake_game(canvas)
+                time.sleep(GAME_SPEED) # Control game speed
+
+                # Control snake direction with hand gestures (simplified)
+                # This needs more robust gesture recognition for actual control
+                if x8 is not None and y8 is not None:
+                    if x8 < largura // 3 and snake_direction != (CELL_SIZE, 0): # Left part of screen
+                        snake_direction = (-CELL_SIZE, 0)
+                    elif x8 > 2 * largura // 3 and snake_direction != (-CELL_SIZE, 0): # Right part of screen
+                        snake_direction = (CELL_SIZE, 0)
+                    elif y8 < altura // 3 and snake_direction != (0, CELL_SIZE): # Top part of screen
+                        snake_direction = (0, -CELL_SIZE)
+                    elif y8 > 2 * altura // 3 and snake_direction != (0, -CELL_SIZE): # Bottom part of screen
+                        snake_direction = (0, CELL_SIZE)
+
+                if game_over: # If game is over, return to drawing mode
+                    game_active = False
+                    canvas = criar_canvas(canvas_altura, canvas_largura) # Clear canvas for drawing
+
+            cv2.imshow("Webcam with Controls", frame_webcam)
+            cv2.imshow("Whiteboard", canvas)
 
             key = cv2.waitKey(1) & 0xFF
             if key == 27:
