@@ -1,0 +1,174 @@
+import cv2
+import numpy as np
+import mediapipe as mp
+
+def inicializar_camera():
+    cap = cv2.VideoCapture(0)
+    ret, frame = cap.read()
+    if not ret:
+        print("Erro ao acessar a webcam.")
+        cap.release()
+        exit()
+    return cap, frame
+
+def criar_canvas(altura, largura):
+    return np.ones((altura, largura, 3), dtype=np.uint8) * 255
+
+def configurar_slider(altura, largura):
+    slider_y1 = altura - 60
+    slider_y2 = altura - 30
+    slider_margin = 60
+    slider_x1 = slider_margin
+    slider_x2 = largura - slider_margin
+    return slider_y1, slider_y2, slider_x1, slider_x2
+
+def desenhar_slider(frame, brush_thickness, slider_y1, slider_y2, slider_x1, slider_x2, min_thickness, max_thickness):
+    cv2.rectangle(frame, (slider_x1, slider_y1), (slider_x2, slider_y2), (180, 180, 180), -1)
+
+    triangle_x = int(np.interp(brush_thickness, [min_thickness, max_thickness], [slider_x1, slider_x2]))
+    triangle_pts = np.array([
+        [triangle_x, slider_y1 - 10],
+        [triangle_x - 10, slider_y1 - 30],
+        [triangle_x + 10, slider_y1 - 30]
+    ])
+    cv2.drawContours(frame, [triangle_pts], 0, (0, 0, 0), -1)
+
+    cv2.putText(frame, f'Thickness: {brush_thickness}', (slider_x1, slider_y1 - 40),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (50, 50, 50), 2)
+    return frame
+
+def draw_rounded_button(frame, x, y, w, h, text, active=True):
+    color_bg = (0, 123, 255) if active else (180, 180, 180)
+    color_text = (255, 255, 255) if active else (120, 120, 120)
+    radius = 20
+
+    cv2.rectangle(frame, (x + radius, y), (x + w - radius, y + h), color_bg, -1)
+    cv2.rectangle(frame, (x, y + radius), (x + w, y + h - radius), color_bg, -1)
+    cv2.circle(frame, (x + radius, y + radius), radius, color_bg, -1)
+    cv2.circle(frame, (x + w - radius, y + radius), radius, color_bg, -1)
+    cv2.circle(frame, (x + radius, y + h - radius), radius, color_bg, -1)
+    cv2.circle(frame, (x + w - radius, y + h - radius), radius, color_bg, -1)
+
+    cv2.putText(frame, text, (x + 20, y + h - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color_text, 2)
+
+def is_point_in_button(x, y, btn_x, btn_y, btn_w, btn_h):
+    return btn_x <= x <= btn_x + btn_w and btn_y <= y <= btn_y + btn_h
+
+def processar_mao(frame, hands, brush_color_index, brush_thickness,
+                  drawing_enabled, prev_point, slider_y1, slider_y2, slider_x1, slider_x2,
+                  min_thickness, max_thickness, colors):
+    frame = cv2.flip(frame, 1)
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    results = hands.process(rgb)
+
+    x8, y8, x4, y4 = None, None, None, None
+
+    if results.multi_hand_landmarks:
+        for hand_landmarks in results.multi_hand_landmarks:
+            mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+
+            h, w, _ = frame.shape
+            x8 = int(hand_landmarks.landmark[8].x * w)
+            y8 = int(hand_landmarks.landmark[8].y * h)
+            x4 = int(hand_landmarks.landmark[4].x * w)
+            y4 = int(hand_landmarks.landmark[4].y * h)
+
+            cv2.circle(frame, (x8, y8), 10, colors[brush_color_index], cv2.FILLED)
+            cv2.circle(frame, (x4, y4), 10, (200, 200, 200), cv2.FILLED)
+            cv2.line(frame, (x4, y4), (x8, y8), (150, 150, 150), 1)
+
+            if slider_y1 <= y8 <= slider_y2:
+                brush_thickness = int(np.interp(x8, [slider_x1, slider_x2], [min_thickness, max_thickness]))
+
+            distance = np.hypot(x8 - x4, y8 - y4)
+            touching = distance < 40
+
+            # Return x8, y8, touching, prev_point for drawing logic in main
+            return frame, brush_thickness, prev_point, x8, y8, touching
+    else:
+        prev_point = None
+
+    return frame, brush_thickness, prev_point, x8, y8, False
+
+def main():
+    global mp_draw, mp_hands
+    mp_hands = mp.solutions.hands
+    mp_draw = mp.solutions.drawing_utils
+
+    colors = [
+        (0, 0, 0), (255, 0, 0), (0, 255, 0), (0, 0, 255),
+        (255, 255, 0), (255, 165, 0), (0, 255, 255), (0, 165, 255)
+    ]
+    brush_color_index = 0
+    drawing_enabled = True
+    brush_thickness = 3
+    min_thickness = 1
+    max_thickness = 50
+
+    cap, frame = inicializar_camera()
+    altura, largura, _ = frame.shape
+
+    canvas_largura = largura
+    canvas_altura = altura
+    canvas = criar_canvas(canvas_altura, canvas_largura)
+
+    slider_y1, slider_y2, slider_x1, slider_x2 = configurar_slider(altura, largura)
+
+    btn_w, btn_h = 140, 50
+    buttons = {
+        "color": {"pos": (10, 10), "text": "Color"},
+        "draw": {"pos": (170, 10), "text": "Draw"},
+        "clean": {"pos": (330, 10), "text": "Clean"},
+    }
+
+    with mp_hands.Hands(max_num_hands=1, min_detection_confidence=0.7) as hands:
+
+        prev_point = None
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            frame_webcam, brush_thickness, prev_point_webcam, x8, y8, touching = processar_mao(
+                frame.copy(), hands, brush_color_index, brush_thickness,
+                drawing_enabled, prev_point, slider_y1, slider_y2, slider_x1, slider_x2,
+                min_thickness, max_thickness, colors
+            )
+
+            draw_rounded_button(frame_webcam, *buttons["color"]["pos"], btn_w, btn_h, buttons["color"]["text"], active=True)
+            draw_rounded_button(frame_webcam, *buttons["draw"]["pos"], btn_w, btn_h, buttons["draw"]["text"], active=drawing_enabled)
+            draw_rounded_button(frame_webcam, *buttons["clean"]["pos"], btn_w, btn_h, buttons["clean"]["text"], active=True)
+
+            desenhar_slider(frame_webcam, brush_thickness, slider_y1, slider_y2, slider_x1, slider_x2, min_thickness, max_thickness)
+
+            if x8 is not None and y8 is not None:
+                if is_point_in_button(x8, y8, buttons["color"]["pos"][0], buttons["color"]["pos"][1], btn_w, btn_h) and touching:
+                    brush_color_index = (brush_color_index + 1) % len(colors)
+
+                if is_point_in_button(x8, y8, buttons["draw"]["pos"][0], buttons["draw"]["pos"][1], btn_w, btn_h) and touching:
+                    drawing_enabled = not drawing_enabled
+
+                if is_point_in_button(x8, y8, buttons["clean"]["pos"][0], buttons["clean"]["pos"][1], btn_w, btn_h) and touching:
+                    canvas = criar_canvas(canvas_altura, canvas_largura)
+
+            if drawing_enabled and touching and y8 < slider_y1:
+                if prev_point is not None:
+                    cv2.line(canvas, prev_point, (x8, y8), colors[brush_color_index], brush_thickness)
+                prev_point = (x8, y8)
+            else:
+                prev_point = None
+
+            cv2.imshow('Webcam with Controls', frame_webcam)
+            cv2.imshow('Whiteboard', canvas)
+
+            key = cv2.waitKey(1) & 0xFF
+            if key == 27:
+                break
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    main()
+
+
