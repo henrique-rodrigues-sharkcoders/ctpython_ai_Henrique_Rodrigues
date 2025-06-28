@@ -1,0 +1,212 @@
+import cv2
+import mediapipe as mp
+import numpy as np
+import time
+import math
+import random
+
+# --- Parâmetros de desenho e interface ---
+colors = [(0, 0, 255), (0, 255, 0), (255, 0, 0), (0, 0, 0)]
+brush_color_index = 0
+brush_thickness = 5
+drawing_enabled = True
+
+# --- Canvas e webcam ---
+largura, altura = 1280, 720
+canvas_largura, canvas_altura = 640, 480
+canvas = np.ones((canvas_altura, canvas_largura, 3), dtype=np.uint8) * 255
+cap = cv2.VideoCapture(0)
+cap.set(3, largura)
+cap.set(4, altura)
+
+# --- Snake game ---
+CELL_SIZE = 20
+snake = [(100, 100)]
+snake_direction = (CELL_SIZE, 0)
+apple = (200, 200)
+game_active = False
+game_over = False
+GAME_SPEED = 0.15
+
+# --- Slider espessura pincel ---
+slider_x1, slider_x2 = 20, 50
+slider_y1, slider_y2 = 200, 400
+min_thickness, max_thickness = 2, 20
+
+mp_hands = mp.solutions.hands
+mp_face_detection = mp.solutions.face_detection
+
+def criar_canvas(h, w):
+    return np.ones((h, w, 3), dtype=np.uint8) * 255
+
+def is_point_in_button(x, y, btn_x, btn_y, btn_w, btn_h):
+    return btn_x <= x <= btn_x + btn_w and btn_y <= y <= btn_y + btn_h
+
+def draw_rounded_button(frame, x, y, w, h, text, active=True):
+    color = (0, 255, 0) if active else (100, 100, 100)
+    cv2.rectangle(frame, (x, y), (x + w, y + h), color, -1, lineType=cv2.LINE_AA)
+    cv2.putText(frame, text, (x + 10, y + int(h / 1.5)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+
+def blur_face(frame, face_detection):
+    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    results = face_detection.process(frame_rgb)
+    if results.detections:
+        for detection in results.detections:
+            bboxC = detection.location_data.relative_bounding_box
+            ih, iw, _ = frame.shape
+            x = int(bboxC.xmin * iw)
+            y = int(bboxC.ymin * ih)
+            w = int(bboxC.width * iw)
+            h = int(bboxC.height * ih)
+            face = frame[y:y + h, x:x + w]
+            if face.size > 0:
+                face = cv2.GaussianBlur(face, (99, 99), 30)
+                frame[y:y + h, x:x + w] = face
+    return frame
+
+def fingers_up(hand_landmarks):
+    fingers = []
+    tip_ids = [4, 8, 12, 16, 20]
+    for i in range(1, 5):
+        fingers.append(hand_landmarks.landmark[tip_ids[i]].y < hand_landmarks.landmark[tip_ids[i] - 2].y)
+    fingers.insert(0, hand_landmarks.landmark[tip_ids[0]].x < hand_landmarks.landmark[tip_ids[0] - 1].x)
+    return fingers
+
+def processar_mao(frame, hands, brush_color_index, brush_thickness, drawing_enabled, prev_point,
+                  slider_y1, slider_y2, slider_x1, slider_x2, min_thickness, max_thickness, colors):
+    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    results = hands.process(frame_rgb)
+    x8, y8 = None, None
+    touching = False
+    all_fingers_up = False
+
+    if results.multi_hand_landmarks:
+        for hand_landmarks in results.multi_hand_landmarks:
+            x8 = int(hand_landmarks.landmark[8].x * largura)
+            y8 = int(hand_landmarks.landmark[8].y * altura)
+            x4 = int(hand_landmarks.landmark[4].x * largura)
+            y4 = int(hand_landmarks.landmark[4].y * altura)
+            touching = math.hypot(x8 - x4, y8 - y4) < 40
+            all_fingers = fingers_up(hand_landmarks)
+            all_fingers_up = all(all_fingers[1:]) and not all_fingers[0]
+            mp.solutions.drawing_utils.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+
+            # Controle do slider de espessura
+            if slider_x1 <= x8 <= slider_x2 and slider_y1 <= y8 <= slider_y2:
+                slider_range = slider_y2 - slider_y1
+                value = (y8 - slider_y1) / slider_range
+                brush_thickness = int(min_thickness + value * (max_thickness - min_thickness))
+
+            # Desenho slider visual
+            cv2.rectangle(frame, (slider_x1, slider_y1), (slider_x2, slider_y2), (0, 255, 0), 2)
+            y_slider = int(slider_y1 + ((brush_thickness - min_thickness) / (max_thickness - min_thickness)) * (slider_y2 - slider_y1))
+            cv2.circle(frame, (int((slider_x1 + slider_x2) / 2), y_slider), 10, (0, 255, 0), -1)
+
+    return frame, brush_thickness, prev_point, x8, y8, touching, all_fingers_up, results
+
+def init_snake_game():
+    global snake, snake_direction, apple, game_over
+    snake = [(100, 100)]
+    snake_direction = (CELL_SIZE, 0)
+    apple = (random.randint(0, canvas_largura // CELL_SIZE - 1) * CELL_SIZE,
+             random.randint(0, canvas_altura // CELL_SIZE - 1) * CELL_SIZE)
+    game_over = False
+
+def update_snake_game():
+    global snake, snake_direction, apple, game_over
+    if game_over:
+        return
+    head = (snake[0][0] + snake_direction[0], snake[0][1] + snake_direction[1])
+    if (head in snake or
+        head[0] < 0 or head[0] >= canvas_largura or
+        head[1] < 0 or head[1] >= canvas_altura):
+        game_over = True
+        return
+    snake.insert(0, head)
+    if head == apple:
+        apple = (random.randint(0, canvas_largura // CELL_SIZE - 1) * CELL_SIZE,
+                 random.randint(0, canvas_altura // CELL_SIZE - 1) * CELL_SIZE)
+    else:
+        snake.pop()
+
+def draw_snake_game(canvas):
+    for segment in snake:
+        cv2.rectangle(canvas, segment, (segment[0] + CELL_SIZE, segment[1] + CELL_SIZE), (0, 255, 0), -1)
+    cv2.rectangle(canvas, apple, (apple[0] + CELL_SIZE, apple[1] + CELL_SIZE), (0, 0, 255), -1)
+
+# --- MAIN LOOP ---
+btn_w, btn_h = 140, 50
+btn_x, btn_y = 10, 10
+btn_label_y = btn_y - 10
+btn_nome = "toggle_game"
+
+with mp_hands.Hands(max_num_hands=1, min_detection_confidence=0.7) as hands, \
+     mp_face_detection.FaceDetection(min_detection_confidence=0.7) as face_detection:
+
+    prev_point = None
+
+    def executar_acao(nome):
+        nonlocal game_active, canvas
+        if nome == "toggle_game":
+            if game_active:
+                game_active = False
+                canvas = criar_canvas(canvas_altura, canvas_largura)
+            else:
+                game_active = True
+                init_snake_game()
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        frame_webcam, brush_thickness, prev_point_webcam, x8, y8, touching, fingers_up, _ = processar_mao(
+            frame.copy(), hands, brush_color_index, brush_thickness,
+            drawing_enabled, prev_point, slider_y1, slider_y2, slider_x1, slider_x2,
+            min_thickness, max_thickness, colors
+        )
+
+        frame_webcam = blur_face(frame_webcam, face_detection)
+
+        draw_rounded_button(frame_webcam, btn_x, btn_y, btn_w, btn_h, "On/Off", active=True)
+        cv2.putText(frame_webcam, "easter-egg", (btn_x, btn_label_y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (50, 50, 50), 2)
+
+        if x8 is not None and y8 is not None:
+            if is_point_in_button(x8, y8, btn_x, btn_y, btn_w, btn_h) and touching:
+                executar_acao(btn_nome)
+
+        if drawing_enabled and touching and y8 < slider_y1:
+            if prev_point is not None:
+                cv2.line(canvas, prev_point, (x8, y8), colors[brush_color_index], brush_thickness)
+            prev_point = (x8, y8)
+        else:
+            prev_point = None
+
+        if game_active:
+            update_snake_game()
+            draw_snake_game(canvas)
+            time.sleep(GAME_SPEED)
+
+            if x8 is not None and y8 is not None:
+                if x8 < largura // 3 and snake_direction != (CELL_SIZE, 0):
+                    snake_direction = (-CELL_SIZE, 0)
+                elif x8 > 2 * largura // 3 and snake_direction != (-CELL_SIZE, 0):
+                    snake_direction = (CELL_SIZE, 0)
+                elif y8 < altura // 3 and snake_direction != (0, CELL_SIZE):
+                    snake_direction = (0, -CELL_SIZE)
+                elif y8 > 2 * altura // 3 and snake_direction != (0, -CELL_SIZE):
+                    snake_direction = (0, CELL_SIZE)
+
+            if game_over:
+                game_active = False
+                canvas = criar_canvas(canvas_altura, canvas_largura)
+
+        cv2.imshow("Webcam with Controls", frame_webcam)
+        cv2.imshow("Whiteboard", canvas)
+
+        key = cv2.waitKey(1) & 0xFF
+        if key == 27:
+            break
+
+cap.release()
+cv2.destroyAllWindows()
